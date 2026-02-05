@@ -1,163 +1,642 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useTravelTracker } from "./hooks/useTravelTracker";
+import {
+  DEFAULT_STATE,
+  isValidImport,
+  mergeState,
+  normalizeCountryName,
+} from "./utils/storage";
+import MapTooltip from "./MapTooltip";
+import MapView from "./MapView";
 
-export default function Map() {
-  const [vistedCountry, setVisitedCountry] = useState([]);
+const CONTINENT_VIEWBOX = {
+  world: "0 0 1008 651",
+  europe: "420 200 220 170",
+  asia: "600 180 330 240",
+  africa: "430 300 240 260",
+  north_america: "40 150 320 240",
+  south_america: "210 360 220 260",
+  oceania: "760 380 220 220",
+};
+
+const CONTINENT_LABELS = [
+  { value: "world", label: "World" },
+  { value: "europe", label: "Europe" },
+  { value: "asia", label: "Asia" },
+  { value: "africa", label: "Africa" },
+  { value: "north_america", label: "North America" },
+  { value: "south_america", label: "South America" },
+  { value: "oceania", label: "Oceania" },
+];
+
+export default function TravelMap() {
+  const {
+    state,
+    setVisited,
+    setWishlist,
+    setSelectedContinent,
+    setShowList,
+    setStatusMode,
+    setListTab,
+    resetState,
+    hydrate,
+  } = useTravelTracker();
+  const {
+    visited,
+    wishlist,
+    selectedContinent,
+    showList,
+    statusMode,
+    listTab,
+  } = state;
+
   const [allCountries, setAllCountries] = useState([]);
   const [selectedCode, setSelectedCode] = useState("");
-  const [showList, setShowList] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [notice, setNotice] = useState("");
+  const [importError, setImportError] = useState("");
+  const fileInputRef = useRef(null);
+  const svgRef = useRef(null);
+  const [hoveredCountry, setHoveredCountry] = useState(null);
+  const [selectedCountry, setSelectedCountry] = useState("");
+  const [labelPositions, setLabelPositions] = useState(new Map());
+  const [viewportWidth, setViewportWidth] = useState(
+    typeof window === "undefined" ? 1024 : window.innerWidth
+  );
 
   useEffect(() => {
-    fetch("http://localhost:3001/visited-countries")
-      .then((res) => res.json())
-      .then((data) => setVisitedCountry(data));
-
-    fetch("http://localhost:3001/all-countries")
-      .then((res) => res.json())
-      .then((data) => setAllCountries(data));
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  useEffect(() => {
+    fetch("http://localhost:3001/all-countries")
+      .then((res) => res.json())
+      .then((data) => setAllCountries(data))
+      .catch((error) => console.error("Failed to load countries:", error));
+  }, []);
+
+  useEffect(() => {
+    if (!svgRef.current) return;
+    const svg = svgRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      const paths = svg.querySelectorAll("path[id]");
+      const next = new Map();
+      paths.forEach((path) => {
+        try {
+          const bbox = path.getBBox();
+          if (!bbox.width || !bbox.height) return;
+          const code = String(path.id || "").toUpperCase();
+          if (!code) return;
+          next.set(code, {
+            x: bbox.x + bbox.width / 2,
+            y: bbox.y + bbox.height / 2,
+            width: bbox.width,
+            height: bbox.height,
+          });
+        } catch (error) {
+          console.warn("Failed to compute label position:", error);
+        }
+      });
+      setLabelPositions(next);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [allCountries]);
+
+  const visitedSet = useMemo(() => new Set(visited), [visited]);
+  const wishlistSet = useMemo(() => new Set(wishlist), [wishlist]);
+  const countriesByCode = useMemo(() => {
+    return new Map(
+      allCountries.map((country) => [
+        String(country.code || "").toUpperCase(),
+        country,
+      ])
+    );
+  }, [allCountries]);
+
   const getColor = (id) => {
-    return vistedCountry.includes(id) ? "#3F51B5" : "#F5F5F5";
+    const code = String(id).toUpperCase();
+    if (visitedSet.has(code)) return "#1F6FEB";
+    if (wishlistSet.has(code)) return "#F59E0B";
+    return "#E5E7EB";
+  };
+
+  const clearNotice = () => {
+    setNotice("");
+    setImportError("");
   };
 
   const handleAddCountry = () => {
-    if (selectedCode) {
-      const selectedCountry = allCountries.find(
-        (country) => country.code === selectedCode
-      );
-      if (!selectedCountry) {
-        alert("Country not found");
+    clearNotice();
+    const code = String(selectedCode || "").toUpperCase();
+    if (!code) return;
+
+    if (!countriesByCode.has(code)) {
+      setNotice("Country not found.");
+      return;
+    }
+
+    if (statusMode === "visited") {
+      if (visitedSet.has(code)) {
+        setNotice("Already in your visited list.");
         return;
       }
-      fetch("http://localhost:3001/add-country", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ name: selectedCountry.name }),
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.error) {
-            alert(data.error);
-          } else {
-            fetch("http://localhost:3001/visited-countries")
-              .then((res) => res.json())
-              .then(setVisitedCountry);
-            setSelectedCode("");
-          }
-        })
-        .catch((err) => {
-          console.error("Error adding country:", err);
-        });
+      const nextVisited = [...visited, code];
+      const nextWishlist = wishlist.filter((item) => item !== code);
+      setVisited(nextVisited);
+      if (nextWishlist.length !== wishlist.length) setWishlist(nextWishlist);
+      setSelectedCode("");
+      return;
+    }
+
+    if (statusMode === "wishlist") {
+      if (wishlistSet.has(code)) {
+        setNotice("Already in your wishlist.");
+        return;
+      }
+      if (visitedSet.has(code)) {
+        setNotice("Already marked as visited.");
+        return;
+      }
+      setWishlist([...wishlist, code]);
+      setSelectedCode("");
     }
   };
-  const handleDelete = (code) => {
-    fetch(`http://localhost:3001/delete-country/${code}`, {
-      method: "DELETE",
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.error) {
-          alert(data.error);
-        } else {
-          setVisitedCountry((prev) => prev.filter((c) => c !== code));
-        }
-      })
-      .catch((err) => {
-        console.error("Error deleting country:", err);
-      });
+
+  const handleRemoveFromVisited = (code) => {
+    const nextVisited = visited.filter((item) => item !== code);
+    setVisited(nextVisited);
   };
 
-  return (
-    <div className="p-6 bg-[#e3f2fd] min-h-screen">
-      <div className="max-w-4xl mx-auto">
-        <div className="grid grid-cols-3 items-center mb-6">
-          <div></div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-blue-700 text-center">
-            Visited Countries Map
-          </h1>
+  const handleRemoveFromWishlist = (code) => {
+    const nextWishlist = wishlist.filter((item) => item !== code);
+    setWishlist(nextWishlist);
+  };
 
-          <div className="flex justify-end items-center gap-4">
-            <p className="text-sm sm:text-base text-gray-700 whitespace-nowrap">
-              Total:{" "}
-              <span className="text-blue-600 font-semibold">
-                {vistedCountry.length}
-              </span>
+  const handleMoveToVisited = (code) => {
+    if (visitedSet.has(code)) return;
+    setVisited([...visited, code]);
+    setWishlist(wishlist.filter((item) => item !== code));
+  };
+
+  const getSvgPoint = (clientX, clientY) => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const point = svg.createSVGPoint();
+    point.x = clientX;
+    point.y = clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return null;
+    return point.matrixTransform(ctm.inverse());
+  };
+
+  const resolveCountry = (target) => {
+    if (!target || target.tagName !== "path") return null;
+    const code = String(target.id || "").toUpperCase();
+    if (!code) return null;
+    return {
+      code,
+      name: target.getAttribute("title") || getCountryName(code),
+    };
+  };
+
+  const handleCountryToggle = (code, name) => {
+    clearNotice();
+    setSelectedCountry(code);
+    setSelectedCode(code);
+
+    if (statusMode === "visited") {
+      if (visitedSet.has(code)) {
+        setVisited(visited.filter((item) => item !== code));
+        setNotice(`Removed ${name} from visited.`);
+        return;
+      }
+      const nextVisited = [...visited, code];
+      setVisited(nextVisited);
+      if (wishlistSet.has(code)) {
+        setWishlist(wishlist.filter((item) => item !== code));
+      }
+      setNotice(`Added ${name} to visited.`);
+      return;
+    }
+
+    if (statusMode === "wishlist") {
+      if (wishlistSet.has(code)) {
+        setWishlist(wishlist.filter((item) => item !== code));
+        setNotice(`Removed ${name} from wishlist.`);
+        return;
+      }
+      if (visitedSet.has(code)) {
+        setNotice(`${name} is already marked as visited.`);
+        return;
+      }
+      setWishlist([...wishlist, code]);
+      setNotice(`Added ${name} to wishlist.`);
+    }
+  };
+
+  const handleMapPointerMove = (event) => {
+    const info = resolveCountry(event.target);
+    if (!info) {
+      setHoveredCountry(null);
+      return;
+    }
+    const point = getSvgPoint(event.clientX, event.clientY);
+    if (!point) return;
+    setHoveredCountry({
+      code: info.code,
+      name: info.name,
+      x: point.x,
+      y: point.y,
+    });
+  };
+
+  const handleMapPointerLeave = () => {
+    setHoveredCountry(null);
+  };
+
+  const handleMapTouchStart = (event) => {
+    const touch = event.touches?.[0];
+    if (!touch) return;
+    const info = resolveCountry(event.target);
+    if (!info) return;
+    const point = getSvgPoint(touch.clientX, touch.clientY);
+    if (!point) return;
+    setHoveredCountry({
+      code: info.code,
+      name: info.name,
+      x: point.x,
+      y: point.y,
+    });
+  };
+
+  const handleMapClick = (event) => {
+    const info = resolveCountry(event.target);
+    if (!info) return;
+    handleCountryToggle(info.code, info.name);
+  };
+
+  const viewBox = CONTINENT_VIEWBOX[selectedContinent] || CONTINENT_VIEWBOX.world;
+  const viewBoxNumbers = useMemo(
+    () => viewBox.split(" ").map((value) => Number(value)),
+    [viewBox]
+  );
+  const zoomLevel = useMemo(() => {
+    const [, , width, height] = viewBoxNumbers;
+    const worldArea = 1008 * 651;
+    const currentArea = Math.max(1, width * height);
+    return worldArea / currentArea;
+  }, [viewBoxNumbers]);
+
+  const getCountryName = (code) => {
+    const country = countriesByCode.get(code);
+    return country?.name || code;
+  };
+
+  const getCountryContinent = (code) => {
+    const country = countriesByCode.get(code);
+    return (
+      country?.continent ||
+      country?.region ||
+      country?.subregion ||
+      null
+    );
+  };
+
+  const continentBreakdown = useMemo(() => {
+    const breakdown = {};
+    visited.forEach((code) => {
+      const continent = getCountryContinent(code);
+      if (!continent) return;
+      breakdown[continent] = (breakdown[continent] || 0) + 1;
+    });
+    return Object.keys(breakdown).length ? breakdown : null;
+  }, [visited, countriesByCode]);
+
+  const selectedContinentLabel =
+    CONTINENT_LABELS.find((item) => item.value === selectedContinent)?.label ||
+    "World";
+
+  const breakdownSummary = useMemo(() => {
+    if (!continentBreakdown) return null;
+    return Object.entries(continentBreakdown)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([continent, count]) => `${continent}: ${count}`)
+      .join(" | ");
+  }, [continentBreakdown]);
+
+  const filteredVisited = useMemo(() => {
+    const term = normalizeCountryName(searchTerm);
+    if (!term) return visited;
+    return visited.filter((code) =>
+      normalizeCountryName(getCountryName(code)).includes(term)
+    );
+  }, [visited, searchTerm, countriesByCode]);
+
+  const filteredWishlist = useMemo(() => {
+    const term = normalizeCountryName(searchTerm);
+    if (!term) return wishlist;
+    return wishlist.filter((code) =>
+      normalizeCountryName(getCountryName(code)).includes(term)
+    );
+  }, [wishlist, searchTerm, countriesByCode]);
+
+  const activeList = listTab === "visited" ? filteredVisited : filteredWishlist;
+  const activeListTitle =
+    listTab === "visited" ? "Visited Countries" : "Wishlist";
+  const activeEmptyMessage =
+    listTab === "visited"
+      ? "No visited countries yet. Start by choosing one above."
+      : "No wishlist countries yet. Add places you want to visit.";
+
+  const handleExport = () => {
+    clearNotice();
+    const payload = {
+      ...DEFAULT_STATE,
+      visited,
+      wishlist,
+      selectedContinent,
+      showList,
+      statusMode,
+      listTab,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "travel-tracker-data.json";
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = (event) => {
+    clearNotice();
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!isValidImport(parsed)) {
+          setImportError("Invalid file format.");
+          return;
+        }
+        const merged = mergeState(state, parsed);
+        hydrate(merged);
+        setNotice("Import complete. Data merged.");
+      } catch (error) {
+        console.error("Import failed:", error);
+        setImportError("Could not read that file.");
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  };
+
+  const handleReset = () => {
+    clearNotice();
+    const confirmed = window.confirm(
+      "Reset all local travel tracker data? This cannot be undone."
+    );
+    if (!confirmed) return;
+    resetState();
+    setSelectedCode("");
+    setSearchTerm("");
+    setNotice("All data reset.");
+  };
+
+  const selectedPosition = selectedCountry
+    ? labelPositions.get(selectedCountry)
+    : null;
+  const tooltipData =
+    hoveredCountry ||
+    (selectedPosition
+      ? {
+          code: selectedCountry,
+          name: getCountryName(selectedCountry),
+          x: selectedPosition.x,
+          y: selectedPosition.y,
+        }
+      : null);
+
+  return (
+    <div className="min-h-screen bg-[#f6f7f9] text-slate-900">
+      <div className="mx-auto w-full max-w-[1400px] px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+        <header className="mb-5">
+          <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-slate-900">
+            Travel Tracker
+          </h1>
+          <p className="mt-2 text-sm sm:text-base text-slate-600">
+            Track the countries you've visited and watch your map come alive.
+          </p>
+        </header>
+
+        <section className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Visited
             </p>
-            <div className="relative inline-block text-left">
+            <p className="mt-2 text-2xl font-semibold text-slate-900">
+              {visited.length}
+            </p>
+            <p className="text-xs text-slate-500">Countries checked off</p>
+          </div>
+          <div className="rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Wishlist
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-slate-900">
+              {wishlist.length}
+            </p>
+            <p className="text-xs text-slate-500">Places to visit</p>
+          </div>
+          <div className="rounded-2xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              View
+            </p>
+            <p className="mt-2 text-lg font-semibold text-slate-900">
+              {selectedContinentLabel}
+            </p>
+            <p className="text-xs text-slate-500">
+              {breakdownSummary || "Continent stats available as you add visits."}
+            </p>
+          </div>
+        </section>
+
+        <section className="rounded-2xl bg-white/90 shadow-sm ring-1 ring-slate-200 p-4 sm:p-5">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="min-w-[220px] flex-1">
+                <label
+                  htmlFor="country-select"
+                  className="text-sm font-medium text-slate-700"
+                >
+                  Choose a country
+                </label>
+                <select
+                  id="country-select"
+                  value={selectedCode}
+                  onChange={(e) => setSelectedCode(e.target.value)}
+                  className="mt-2 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                >
+                  <option value="">Select a country</option>
+                  {allCountries.map((country) => (
+                    <option key={country.code} value={country.code}>
+                      {country.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                role="group"
+                aria-label="Status mode"
+                className="inline-flex h-11 overflow-hidden rounded-lg border border-slate-200 bg-white"
+              >
+                <button
+                  type="button"
+                  onClick={() => setStatusMode("visited")}
+                  className={`px-4 text-sm font-semibold transition ${
+                    statusMode === "visited"
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  Visited
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStatusMode("wishlist")}
+                  className={`px-4 text-sm font-semibold transition ${
+                    statusMode === "wishlist"
+                      ? "bg-slate-900 text-white"
+                      : "text-slate-600 hover:bg-slate-50"
+                  }`}
+                >
+                  Wishlist
+                </button>
+              </div>
+
+              <button
+                onClick={handleAddCountry}
+                disabled={!selectedCode}
+                className="h-11 rounded-lg bg-[#2f6f77] px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#275c63] focus:outline-none focus:ring-2 focus:ring-[#2f6f77]/30 disabled:cursor-not-allowed disabled:bg-slate-300"
+              >
+                Add to {statusMode === "wishlist" ? "wishlist" : "visited"}
+              </button>
+
+              <div className="min-w-[180px]">
+                <label className="text-sm font-medium text-slate-700">
+                  Continent view
+                </label>
+                <div className="mt-2 flex items-center gap-2">
+                  <select
+                    value={selectedContinent}
+                    onChange={(e) => setSelectedContinent(e.target.value)}
+                    className="h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                  >
+                    {CONTINENT_LABELS.map((continent) => (
+                      <option key={continent.value} value={continent.value}>
+                        {continent.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedContinent("world")}
+                    className="h-11 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50"
+                  >
+                    Reset
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
               <button
                 onClick={() => setShowList(!showList)}
-                className="bg-blue-500 text-white px-3 py-1.5 rounded hover:bg-blue-600 text-sm sm:text-base"
+                className="h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+                aria-expanded={showList}
+                aria-controls="visited-list"
               >
-                {showList || vistedCountry.length === 0
-                  ? "Hide List"
-                  : "Show List"}
+                {showList ? "Hide List" : "Show List"}
               </button>
-              {showList && (
-                <div className="absolute z-10 right-0 mt-2 w-64 bg-white rounded shadow-md ">
-                  <div className="p-4 max-h-64 overflow-y-auto">
-                    <h2 className="text-xl font-semibold mb-2 text-gray-800">
-                      Visited Countries
-                    </h2>
-                    <ul className="divide-y divide-gray-200">
-                      {vistedCountry.map((code) => {
-                        const country = allCountries.find(
-                          (c) => c.code === code
-                        );
-                        return (
-                          <li
-                            key={code}
-                            className="flex justify-between items-center py-1 border-b"
-                          >
-                            <span>{country ? country.name : code}</span>
-                            <button
-                              onClick={() => handleDelete(code)}
-                              className="text-red-600 hover:text-red-800 text-sm"
-                            >
-                              Remove
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                </div>
+              <button
+                onClick={handleExport}
+                className="h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              >
+                Export
+              </button>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200"
+              >
+                Import
+              </button>
+              <button
+                onClick={handleReset}
+                className="h-10 rounded-lg border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-700 shadow-sm transition hover:bg-rose-100 focus:outline-none focus:ring-2 focus:ring-rose-200"
+              >
+                Reset data
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json"
+                onChange={handleImport}
+                className="hidden"
+                aria-hidden="true"
+              />
+              {notice && (
+                <span className="text-xs font-medium text-emerald-700">
+                  {notice}
+                </span>
+              )}
+              {importError && (
+                <span className="text-xs font-medium text-rose-600">
+                  {importError}
+                </span>
               )}
             </div>
           </div>
-        </div>
+        </section>
 
-        <div className="mb-6 flex gap-4 items-center justify-center">
-          <select
-            value={selectedCode}
-            onChange={(e) => setSelectedCode(e.target.value)}
-            className="border border-gray-300 rounded px-4 py-2 w-64 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            <option value="">Select a country</option>
-            {allCountries.map((country) => (
-              <option key={country.code} value={country.code}>
-                {country.name}
-              </option>
-            ))}
-          </select>
-          <div className="relative inline-block text-left"></div>
-          <button
-            onClick={handleAddCountry}
-            className="bg-teal-600 text-white px-4 py-2 rounded hover:bg-teal-700 transition"
-          >
-            Add
-          </button>
-        </div>
-      </div>
+        <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_320px] lg:items-start">
+          <section className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 p-3 sm:p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-2 pb-3 text-xs font-medium uppercase tracking-wide text-slate-500">
+              <span>Map View: {selectedContinentLabel}</span>
+              <div className="flex items-center gap-4">
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-[#5F8F7A]"></span>
+                  Visited
+                </span>
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-[#A6B9D4]"></span>
+                  Wishlist
+                </span>
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-[#E7EDF2]"></span>
+                  Not visited
+                </span>
+              </div>
+            </div>
 
-      <div>
-        <section style={{ backgroundColor: "#4FC3F7" }} className="ag-canvas">
-          <svg
-            className="ag-canvas_svg"
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 1008 651"
-          >
+            <div className="overflow-hidden">
+              <div className="h-[70vh] min-h-[420px] max-h-[760px] w-full">
+                <MapView
+                  svgRef={svgRef}
+                  viewBox={viewBox}
+                  onPointerMove={handleMapPointerMove}
+                  onPointerLeave={handleMapPointerLeave}
+                  onTouchStart={handleMapTouchStart}
+                  onClick={handleMapClick}
+                >
             <path
               id="AE"
               title="United Arab Emirates"
@@ -1214,8 +1693,120 @@ export default function Map() {
               fill={getColor("ZW")}
               d="M562.709,526.998L561.219,526.697L560.274,527.059L558.917,526.548L557.776,526.516L555.989,525.158L553.821,524.698L552.996,522.803L552.989,521.752L551.788,521.432L548.615,518.177L547.733,516.471L547.169,515.946L546.09,513.602L549.224,513.922L550.135,514.26L551.082,514.192L552.634,512.299L555.073,509.904L556.076,509.676L556.417,508.67L558.014,507.516L560.138,507.12L560.319,508.2L562.658,508.142L563.957,508.754L564.562,509.472L565.896,509.683L567.353,510.617L567.359,514.312L566.813,516.347L566.692,518.55L567.143,519.426L566.826,521.172L566.402,521.443L565.663,523.593z"
             />
-          </svg>
-        </section>
+            <MapTooltip data={tooltipData} viewBox={viewBoxNumbers} />
+          </MapView>
+              </div>
+            </div>
+          </section>
+
+          {showList && (
+            <aside
+              id="visited-list"
+              className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 p-4 sm:p-5"
+            >
+              <div className="flex items-start justify-between gap-3 pb-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-900">
+                    {activeListTitle}
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Search and manage your saved countries.
+                  </p>
+                </div>
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+                  {activeList.length}
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pb-3">
+                <div
+                  role="tablist"
+                  aria-label="Country list tabs"
+                  className="inline-flex overflow-hidden rounded-lg border border-slate-200 bg-white"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={listTab === "visited"}
+                    onClick={() => setListTab("visited")}
+                    className={`px-4 py-2 text-xs font-semibold uppercase tracking-wide transition ${
+                      listTab === "visited"
+                        ? "bg-slate-900 text-white"
+                        : "text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    Visited
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={listTab === "wishlist"}
+                    onClick={() => setListTab("wishlist")}
+                    className={`px-4 py-2 text-xs font-semibold uppercase tracking-wide transition ${
+                      listTab === "wishlist"
+                        ? "bg-slate-900 text-white"
+                        : "text-slate-600 hover:bg-slate-50"
+                    }`}
+                  >
+                    Wishlist
+                  </button>
+                </div>
+
+                <input
+                  type="search"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="Search list"
+                  className="h-10 flex-1 rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-700 shadow-sm outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
+                />
+              </div>
+
+              {activeList.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-slate-200 px-3 py-6 text-center text-sm text-slate-500">
+                  {activeEmptyMessage}
+                </p>
+              ) : (
+                <ul className="max-h-[420px] space-y-2 overflow-y-auto pr-2 text-sm">
+                  {activeList.map((code) => {
+                    const name = getCountryName(code);
+                    return (
+                      <li
+                        key={code}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-100 bg-slate-50/60 px-3 py-2"
+                      >
+                        <span className="font-medium text-slate-700">
+                          {name}
+                        </span>
+                        <div className="flex items-center gap-3">
+                          {listTab === "wishlist" && (
+                            <button
+                              onClick={() => handleMoveToVisited(code)}
+                              className="text-xs font-semibold text-emerald-700 transition hover:text-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                              aria-label={`Move ${name} to visited`}
+                            >
+                              Mark visited
+                            </button>
+                          )}
+                          <button
+                            onClick={() =>
+                              listTab === "visited"
+                                ? handleRemoveFromVisited(code)
+                                : handleRemoveFromWishlist(code)
+                            }
+                            className="text-xs font-semibold text-rose-600 transition hover:text-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                            aria-label={`Remove ${name}`}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </aside>
+          )}
+        </div>
       </div>
     </div>
   );
