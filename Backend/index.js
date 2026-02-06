@@ -6,14 +6,11 @@ const dotenv = require("dotenv");
 dotenv.config();
 
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 
 const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
 });
 
 app.use(cors());
@@ -22,7 +19,7 @@ app.use(express.json());
 app.get("/visited-countries", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT country_code FROM visited_countries"
+      "SELECT country_code FROM visited_countries",
     );
     const countries = result.rows.map((row) => row.country_code);
     res.json(countries);
@@ -34,7 +31,7 @@ app.get("/visited-countries", async (req, res) => {
 app.get("/all-countries", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT country_code, country_name FROM countries ORDER BY country_name"
+      "SELECT country_code, country_name FROM countries ORDER BY country_name",
     );
     const countries = result.rows.map((row) => ({
       code: row.country_code,
@@ -53,7 +50,7 @@ app.delete("/delete-country/:code", async (req, res) => {
   try {
     const result = await pool.query(
       "DELETE FROM visited_countries WHERE country_code = $1",
-      [code]
+      [code],
     );
     if (result.rowCount > 0) {
       res.json({ message: "Country deleted successfully" });
@@ -77,7 +74,7 @@ app.post("/add-country", async (req, res) => {
     console.log("Searching country:", name);
     const result = await pool.query(
       "SELECT country_code FROM countries WHERE LOWER(country_name) LIKE $1",
-      [`%${name.trim().toLowerCase()}%`]
+      [`%${name.trim().toLowerCase()}%`],
     );
 
     console.log("Result: ", result.rows);
@@ -90,7 +87,7 @@ app.post("/add-country", async (req, res) => {
 
     const exists = await pool.query(
       "SELECT * FROM visited_countries WHERE country_code = $1",
-      [countryCode]
+      [countryCode],
     );
 
     console.log("Checking visited_countries:", exists.rows);
@@ -100,7 +97,7 @@ app.post("/add-country", async (req, res) => {
 
     await pool.query(
       "INSERT INTO visited_countries (country_code) VALUES ($1)",
-      [countryCode]
+      [countryCode],
     );
 
     res.json({ message: `Country ${name} added sunccessfully` });
