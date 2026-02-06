@@ -1,6 +1,6 @@
 /* Travel Tracker map refinements */
 .travel-map {
-  background: linear-gradient(180deg, #dbeafe 0%, #c7d2fe 100%);
+  background: linear-gradient(180deg, #d7ecf6 0%, #c3dbe7 100%);
 }
 
 .travel-map__svg {
@@ -12,14 +12,14 @@
 .travel-map__svg path {
   transition: fill 220ms ease, filter 220ms ease, stroke 220ms ease;
   cursor: pointer;
-  stroke: #a5b4c4;
-  stroke-width: 0.7;
+  stroke: rgba(123, 139, 154, 0.55);
+  stroke-width: 0.55;
   vector-effect: non-scaling-stroke;
 }
 
 .travel-map__svg path:hover {
-  filter: brightness(0.98) saturate(1.08);
-  stroke: #64748b;
+  filter: brightness(0.98) saturate(1.04);
+  stroke: rgba(71, 85, 105, 0.7);
 }
 
 .map-labels text {
