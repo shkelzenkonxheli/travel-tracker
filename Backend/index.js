@@ -13,8 +13,21 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-app.use(cors());
-app.use(express.json());
+const allowedOrigins = [
+  "http://localhost:5173",
+  "travel-tracker-psi-lime.vercel.app",
+];
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  }),
+);
 
 app.get("/visited-countries", async (req, res) => {
   try {
